@@ -1,0 +1,204 @@
+---
+##
+#  For startup use: `vagrant up --provider virtualbox`
+#  Othe providers like vmware are not yet tested/integrated
+#  After each change in here run: `vagrant reload`
+#  Configure your local DNS server or `/etc/hosts` file to point host_name to network
+#
+#  You can override this file within `vagrant_local.yml`
+##
+
+##
+#  ENVIRONMENT VARIABLES
+#
+# Besides the default vagrant variables: https://www.vagrantup.com/docs/other/environmental-variables.html
+# the following environment variables can be used:
+#
+#  VAGRANT_SETTINGS: Override name of vagrant.yml and vagrant_local.yml
+# > Useful for multiple environments
+#
+#  ANSIBLE_PLAYBOOK: Override ansible playbook set in ansible section
+#  ANSIBLE_TAGS: Override ansible tags set in ansible section
+#
+#  BOX_USER: Set the box_url user for http access
+#  BOX_PASS: Set the box_url pass for http access
+# > Additionally add BOX_USER and BOX_PASS as placeholder to box_url
+# > box_url: http://BOX_USER:BOX_PASS@vagrant.rubot.de/ubuntu1604
+##
+
+##
+#  BASICS
+##
+box: rubot/ubuntu1604
+box_url: http://xxx:xxx@vagrant.rubot.de/rubot/ubuntu1604
+# box_version: 0.9.0  # Define the box_version to use
+box_check_update: yes
+# forward_agent: yes  # Forward ssh-agent
+# gui: yes  # Display VirtualBox gui
+# memory: 512  # RAM in MB
+linked_clone: yes  # Use VirtualBox linked clone feature
+post_up_message: yes  # Hints for connecting with ssh
+create_init: yes  # creates vagrant.sh
+
+##
+#  HOST_NAME
+#  Sets the hostname
+#
+#  The hostname. If omitted remains `vagrant`.
+#  Configure your local DNS (/etc/hosts) to point host_name to network.
+#
+#  WARNING
+#
+#  If you change host_name after creation, set host_string to old host_name, otherwise
+#+ vagrant fails to find the machine and you have to delete it manually in VirtualBox.
+#+ You find the HOST_STRING setting below.
+#+ You can check the currently by Vagrant used HOST_STRING by running
+#+    `vagrant ssh-config`
+#
+# // format is [git-branch|<string>]
+##
+host_name: default.rubot.vagrant
+
+##
+#  NETWORK
+#  adds additional 'private_network' interfaces to vm. eth1-eth(n)
+#
+#  If you remove an already configured dhcp interface,
+#+ the next startup will last longer, because of the dhcp timeout.
+#  After the startup, vagrant will delete the interface and the next startup should be quick again.
+#
+## FORMAT
+# string: dhcp, or ip: xxx.xxx.xxx.xxx
+#
+## EXAMPLE
+# network:
+#   - dhcp
+#   - 172.28.128.28
+##
+network:
+  - dhcp
+
+##
+#  PORTS
+#  Forward ports to local interface. Avoid and use NETWORK instead.
+#
+#  A host-port below 1024 is not possible for VirtualBox
+#  If host-ip is 0.0.0.0, host-port becomes available outside your computer
+#  Protocol is either 'udp', or 'tcp'
+#
+# EXAMPLE
+#
+# // format is <guest-ip:guest-port:host-port:host-ip:protocol>
+# ports:
+#   - 0.0.0.0:80:8080:0.0.0.0:tcp
+##
+
+##
+#  SHARED_FOLDERS
+#  Mounts local folders to vm
+#
+##
+#  There is a VirtualBox bug related to sendfile which can result in corrupted or non-updating files.
+#  You should deactivate sendfile in any web servers you may be running.
+#
+# // In Nginx
+#   sendfile off;
+# // In Apache
+#   EnableSendfile Off
+#
+## FORMAT
+#
+# The key will be available as "/some/path" in the guest.
+#
+# Special keys:
+#  - $CWD$ => .  # (current directory)
+#  - $HOME$ => $HOME  # (users home directory)
+#
+# The values are compound to https://www.vagrantup.com/docs/synced-folders/basic_usage.html
+#
+#   local_path: string
+#   mount_options: array
+#   group: string
+#   owner: string
+#   type: string
+#   rsync__exclude: array
+#
+# Special values for local_path:
+#  - $CWD$ => .  # (current directory)
+#  - $HOME$ => $HOME  # (users home directory)
+#
+## EXAMPLE
+#
+# shared_folders:
+#   some/path:
+#     local_path: src/
+#     mount_options:
+#       - 'rw'
+#     group: www-data
+#     owner: www-data
+#     type: rsync
+#     rsync__exclude:
+#       - .DS_Store
+#       - config/databases.yml
+#   z/xampp:  # Useful, if host is Windows and current folder is under Z:\xampp
+#     local_path: .
+#   z/xampp:  # The same, but hardcoded
+#     local_path: Z:\xampp
+#   $CWD$:
+#     local_path: .
+#   $HOME$/.ssh:
+#     local_path: $HOME$/.ssh
+#     mount_options:
+#       - 'ro'
+#   Users:
+#     local_path: /Users
+#     mount_options:
+#       - 'ro'
+##
+shared_folders:
+  home/rubot/src:
+    local_path: .
+    group: rubot
+    owner: rubot
+    mount_options:
+      - 'ro'
+
+##
+#  DOCKER
+#  Installs docker and pulls image
+#
+# EXAMPLE
+#
+# docker:
+#   image: rubot/ansible:debian8
+##
+
+##
+#  ANSIBLE
+#  runs playbook with tags
+##
+#  INFO
+#  It is not the ansibl_local provisioner, but the ansible provisioner: https://www.vagrantup.com/docs/provisioning/ansible.html
+#  TODO
+#  Point out the difference
+##
+# EXAMPLE
+#
+# ansible:
+#   playbook: provision/dev.yml
+#   tags:
+#     - sync
+##
+
+##
+#  HOST_STRING
+#  The ssh-connection-string/internal-name for vagrant
+#
+#  Defaults to host_name. Fallback to `dev`.
+#  It is vagrants internal name for the machine. Used e.g. for VirtualBox naming.
+#
+# EXAMPLE
+#
+# // format is [git-branch|<string>]
+# host_string: dev.vagrant
+##

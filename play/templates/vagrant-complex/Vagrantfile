@@ -1,0 +1,327 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+require 'yaml'
+require 'open3'
+
+cwd = File.dirname(__FILE__)
+
+# Override yaml settings file name
+settings_yaml = ENV['VAGRANT_SETTINGS'] || 'vagrant'
+settings_yaml = File.basename(settings_yaml,File.extname(settings_yaml))
+
+# Load yaml settings file
+proj_settings_file = cwd + "/#{settings_yaml}.yml"
+_s = YAML.load_file(proj_settings_file)
+
+# Load local/user yml settings file and merge into main settings
+user_settings_file = cwd + '/' + _s.fetch("#{settings_yaml}_local", "#{settings_yaml}_local.yml")
+if File.exist?(user_settings_file)
+  _s = _s.merge(YAML.load_file(user_settings_file))
+end
+
+# Get git branch name
+begin
+  stdout, stderr, status = Open3.capture3("git rev-parse -q --abbrev-ref HEAD")
+  rescue
+end
+git_branch = stdout.to_s.strip ? stdout : nil
+
+# Get/Set Vagrant host_name
+host_name = _s.fetch('host_name', false)
+if host_name == 'git-branch' and git_branch
+  host_name = git_branch
+end
+
+# Get/Set Vagrant host_string
+host_string = _s['host_string'] || host_name || 'dev'
+if host_string == 'git-branch' and git_branch
+  host_string = git_branch
+end
+
+# Main Vagrant up
+Vagrant.configure(2) do |config|
+
+  config.ssh.forward_agent = _s.fetch('forward_agent', false)
+
+  config.vm.define "#{host_string}" do |dev|
+
+    if box = _s.fetch('box', false)
+      dev.vm.box = "#{box}"
+    end
+    if box_url = _s.fetch('box_url', false)
+      if box_url.include?('BOX_USER')
+        box_url = box_url.gsub(/BOX_USER/, ENV['BOX_USER'] || _s.fetch('BOX_USER', false) || '')
+      end
+      if box_url.include?('BOX_PASS')
+        box_url = box_url.gsub(/BOX_PASS/, ENV['BOX_PASS'] || _s.fetch('BOX_PASS', false) || '')
+      end
+      dev.vm.box_url = "#{box_url}"
+    end
+    if not _s.fetch('box_check_update', true)
+      dev.vm.box_check_update = false
+    end
+    if box_version = _s.fetch('box_version', false)
+      dev.vm.box_version = "#{box_version}"
+    end
+    if host_name
+      dev.vm.hostname = "#{host_name}"
+    end
+
+    dev.vm.synced_folder ".", "/vagrant", disabled: true
+    network = _s.fetch('network', [])
+    begin
+      network.each do |val|
+        if val == 'dhcp'
+          dev.vm.network "private_network", type: "dhcp"
+        else
+          dev.vm.network "private_network", ip: "#{val}"
+        end
+      end
+    rescue
+      puts "`network` is probably not an Array."
+    end
+
+    ports = _s.fetch('ports', [])
+    begin
+      ports.each do |val|
+        val = val.split(':')
+        dev.vm.network "forwarded_port", guest_ip: val[0], guest: val[1], host: val[2], host_ip: val[3], protocol: val[4]
+      end
+    rescue
+      puts "`ports` is probably not an Array."
+    end
+
+    shared_folders = _s.fetch('shared_folders', {})
+    begin
+      shared_folders.each do |key, val|
+        if key.include?('$CWD$')
+          key = key.gsub(/\$CWD\$/, cwd.gsub(/^\//, ''))
+        elsif key.include?('$HOME$')
+          key = key.gsub(/\$HOME\$/, Dir.home.gsub(/^\//, ''))
+        end
+        if val['local_path'].include?('$CWD$')
+          val['local_path'] = val['local_path'].gsub(/\$CWD\$/, cwd)
+        elsif val['local_path'].include?('$HOME$')
+          val['local_path'] = val['local_path'].gsub(/\$HOME\$/, Dir.home)
+        end
+        dev.vm.synced_folder "#{val['local_path']}", "/#{key}",
+          :mount_options => val.fetch('mount_options', []),
+          :owner => val.fetch('owner', 'vagrant'),
+          :group => val.fetch('group', 'vagrant'),
+          :type => val.fetch('type', nil),
+          :rsync__exclude => val.fetch('rsync__exclude', [])
+      end
+    rescue
+      puts "`shared_folders` is probably not a Hash."
+    end
+
+    dev.vm.provider "virtualbox" do |vb|
+      vb.linked_clone = true if Vagrant::VERSION.split('.')[1].to_i >= 8 and _s.fetch('linked_clone', true)
+      #: Display the VirtualBox GUI when booting the machine
+      if _s.fetch('gui', false)
+        vb.gui = true
+      end
+      #: Customize the amount of memory on the VM:
+      if memory = _s.fetch('memory', false)
+        vb.memory = memory
+      end
+    end
+
+    # Provision some comfort settings .g. to get the vm ip
+    dev.vm.provision "shell", inline: <<-SHELL
+      # export DEBIAN_FRONTEND=noninteractive
+      # sudo aptitude update
+      [[ ! -d ~rubot/.ssh ]] && sudo -u rubot mkdir ~rubot/.ssh
+
+      for profile in /home/vagrant/.profile /root/.profile; do
+        if [[ ! $(grep 'tty -s' $profile) ]]; then
+          sed -i '/mesg n/d' $profile
+          echo 'tty -s && mesg n' >> $profile
+        fi
+      done
+
+      hostname -I|awk '{print $2}'|tee /myip
+      echo "@reboot root hostname -I|awk '{print \\\$2}'|tee /myip" > /etc/cron.d/myip
+      chmod a+x /etc/cron.d/myip
+    SHELL
+
+    # Configure if docker should be installed.
+    # Provision vm to have the docker server port open for external access
+    if _s.include?('docker') and _s['docker'].fetch('image', false)
+      dev.vm.provision "shell", inline: <<-SHELL
+        ##
+        # WORKAROUND, for when docker was installed manually/beforehand
+        ##
+        if [[ -f /etc/default/docker ]]; then
+          echo 'DOCKER_OPTS="-H tcp://0.0.0.0:2376 -H unix:///var/run/docker.sock --tls=false"' > /etc/default/docker
+          service docker restart &>/dev/null || true
+        fi
+        if [[ -f /lib/systemd/system/docker.service ]]; then
+          mkdir -p /etc/systemd/system/docker.service.d
+          echo '
+[Service]
+EnvironmentFile=-/etc/default/docker
+ExecStart=
+ExecStart=/usr/bin/dockerd -H fd:// $DOCKER_OPTS
+' > /etc/systemd/system/docker.service.d/vagrant.conf
+          systemctl daemon-reload &>/dev/null || true
+          systemctl restart docker.service &>/dev/null || true
+          systemctl enable docker.service &>/dev/null || true
+        fi
+      SHELL
+
+      dev.vm.provision "docker" do |d|
+        d.pull_images "#{_s['docker']['image']}"
+      end
+
+      dev.vm.provision "shell", inline: <<-SHELL
+        ##
+        # Some historical findouts
+        ##
+        #   export DEBIAN_FRONTEND=noninteractive
+        #   if [[ ! $(grep 'PermitUserEnvironment=yes' /etc/ssh/sshd_config) ]];
+        #     then
+        #     echo PermitUserEnvironment=yes >> /etc/ssh/sshd_config
+        #     echo 'DOCKER_HOST=tcp://0.0.0.0:2376' > ~vagrant/.ssh/environment
+        #     service ssh restart
+        #   fi
+        #   pro_file=/etc/profile.d/docker_host.sh
+        #   echo 'export DOCKER_HOST="tcp://0.0.0.0:2376"' > $pro_file
+        ##
+
+        ##
+        # Use the same as above WORKAROUND, for when docker was freshly installed
+        ##
+        if [[ -f /etc/default/docker ]]; then
+          echo 'DOCKER_OPTS="-H tcp://0.0.0.0:2376 -H unix:///var/run/docker.sock --tls=false"' > /etc/default/docker
+          service docker restart &>/dev/null || true
+        fi
+        if [[ -f /lib/systemd/system/docker.service ]]; then
+          mkdir -p /etc/systemd/system/docker.service.d
+          echo '
+[Service]
+EnvironmentFile=-/etc/default/docker
+ExecStart=
+ExecStart=/usr/bin/dockerd -H fd:// $DOCKER_OPTS
+' > /etc/systemd/system/docker.service.d/vagrant.conf
+          systemctl daemon-reload &>/dev/null || true
+          systemctl restart docker.service &>/dev/null || true
+          systemctl enable docker.service &>/dev/null || true
+        fi
+      SHELL
+    end
+
+    # Ansible provisioning
+    if _s.include?('ansible') and _s['ansible'].fetch('playbook', false)
+      dev.vm.provision "ansible" do |ansible|
+        ansible.playbook = ENV['ANSIBLE_PLAYBOOK'] || _s['ansible'].fetch('playbook')
+        ansible.tags = ENV['ANSIBLE_TAGS'] || _s['ansible'].fetch('tags', nil)
+      end
+    end
+
+    if _s.fetch('post_up_message', false)
+      # Finish with some informations
+      # REMINDER: ssh -F ssh-config `grep '^Host' ssh-config | awk '{print $2}'`
+      post_up_message = "Well done!\n\n"\
+        "Now you could run ./vagrant.sh for some tasks.\n"\
+        "\n"\
+        "Also you could use `play` with the playfile-vagrant template: https://code.rubot.de/tools/play\n\n"
+
+      init_content = "#!/bin/bash\n\n"\
+"# TODO: ssh user switch\n\n"\
+"task=$1\n"\
+"key=${2:-~/.ssh/id_rsa.pub}\n"\
+"[[ $task ]] && shift\n\n"\
+"_usage(){\n"\
+"    echo\n"\
+"    echo \"Usage $0 [init <~/.ssh/id_rsa.pub>|clean|rm|ssh|ssh1]\"\n"\
+"}\n"\
+"_clean(){\n"\
+"    rm -f vagrant.port vagrant.ssh\n"\
+"    exit\n"\
+"}\n"\
+"_rm(){\n"\
+"    rm -f vagrant.port vagrant.ssh vagrant.sh\n"\
+"    exit\n"\
+"}\n\n"\
+"[[ $task == 'clean' ]] && _clean\n"\
+"[[ $task == 'rm' ]] && _rm\n\n"\
+"VAGRANT_HOSTNAME=#{host_string}\n"\
+"VAGRANT_SSH_OPTS='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'\n\n"\
+"if [[ -f vagrant.port ]]; then\n"\
+"    VAGRANT_IP=`cat vagrant.port|cut -d: -f1`\n"\
+"    VAGRANT_PORT=`cat vagrant.port|cut -d: -f2`\n"\
+"fi\n\n"\
+"_init(){\n"\
+"    if [[ ! $VAGRANT_PORT || ! $VAGRANT_IP ]]; then\n"\
+"        echo exporting vagrant.port...\n"\
+"        VAGRANT_PORT=`vagrant port --guest 22`\n"\
+"        ssh -q -oBatchMode=yes $VAGRANT_SSH_OPTS -p $VAGRANT_PORT -q vagrant@127.0.0.1 -Oexit &>/dev/null\n"\
+"        if ! ssh -q -oBatchMode=yes $VAGRANT_SSH_OPTS -p $VAGRANT_PORT -q vagrant@127.0.0.1 whoami &>/dev/null; then\n"\
+"            if [[ -f $key ]]; then\n"\
+"                echo copying public key...\n"\
+"                cat $key | vagrant ssh -c 'cat | sudo tee -a ~vagrant/.ssh/authorized_keys'\n"\
+"            fi\n"\
+"        fi\n"\
+"        # VAGRANT_IP=`vagrant ssh -c 'cat /myip'`  # broken output\n"\
+"        VAGRANT_IP=`ssh $VAGRANT_SSH_OPTS -p $VAGRANT_PORT -q vagrant@127.0.0.1 cat /myip`\n"\
+"        echo $VAGRANT_IP:$VAGRANT_PORT > vagrant.port\n"\
+"    fi\n"\
+"    if [[ ! -f vagrant.ssh ]] || ! ssh -oBatchMode=yes -F vagrant.ssh $VAGRANT_HOSTNAME whoami &>/dev/null; then\n"\
+"        echo exporting vagrant.ssh...\n"\
+"        vagrant ssh-config > vagrant.ssh\n"\
+"    fi\n"\
+"}\n\n"\
+"_ssh(){\n"\
+"    [[ ! -f vagrant.ssh ]] && vagrant ssh-config > vagrant.ssh\n"\
+"    echo \"$ ssh -F vagrant.ssh $VAGRANT_HOSTNAME $@\"\n"\
+"    echo\n"\
+"    ssh -F vagrant.ssh $VAGRANT_HOSTNAME $@\n"\
+"}\n\n"\
+"_ssh1(){\n"\
+"    #echo \"$ ssh $VAGRANT_SSH_OPTS $user@$VAGRANT_IP $@\"\n"\
+"    echo \"$ ssh $VAGRANT_SSH_OPTS vagrant@$VAGRANT_IP $@\"\n"\
+"    echo\n"\
+"    ssh $VAGRANT_SSH_OPTS vagrant@$VAGRANT_IP $@\n"\
+"}\n\n"\
+"[[ ${task} ]] && _${task} ${@} || _usage\n\n"\
+"if [[ $VAGRANT_IP && (! $task || $task == 'init') ]]; then\n"\
+"echo\n"\
+"echo     $VAGRANT_HOSTNAME is at $VAGRANT_IP 127.0.0.1:$VAGRANT_PORT\n"\
+"echo\n"\
+"echo \"You could connect with: ssh $VAGRANT_SSH_OPTS vagrant@$VAGRANT_IP\"\n"\
+"echo \"...or with ssh $VAGRANT_SSH_OPTS -p $VAGRANT_PORT -q vagrant@127.0.0.1\"\n"\
+"echo \"...or with ssh $VAGRANT_HOSTNAME  # If you configured DNS\"\n"\
+"echo \"...or with ssh -F vagrant.ssh $VAGRANT_HOSTNAME\"\n"\
+"echo \"...or with ./vagrant.sh ssh1\"\n"\
+"echo \"...or with ./vagrant.sh ssh2\"\n"\
+"echo \"...or with vagrant ssh :)\"\n"\
+"echo\n"\
+"echo Ideas:\n"\
+"echo \"cat ~/.ssh/id_rsa.pub | vagrant ssh -c 'cat | sudo tee -a ~rubot/.ssh/authorized_keys && sudo chown -R rubot:rubot ~rubot'\"\n"\
+"echo \"ssh $VAGRANT_SSH_OPTS rubot@$VAGRANT_IP\"\n"\
+"echo \"echo $VAGRANT_HOSTNAME ansible_host=$VAGRANT_IP ansible_ssh_common_args='$VAGRANT_SSH_OPTS' > env/vagrant\"\n"\
+"echo \"export DOCKER_HOST=\"tcp://$VAGRANT_IP:2376\" && export DOCKER_TLS_VERIFY=\"\n"\
+"echo\n"\
+"echo \"\\\`./vagrant.sh clean\\\` to recreate on \\\`vagrant reload\\\`\"\n"\
+"echo \"In vagrant.yml 'create_init: no' prevents creation of vagrant.sh\"\n"\
+"fi"\
+"\n"
+
+      if _s.fetch('create_init', false)
+        init_file = 'vagrant.sh'
+        if not File.file?(init_file)
+          File.write(init_file, init_content)
+          post_up_message += "Created: vagrant.sh"
+          begin
+            File.chmod(0777,init_file)
+          rescue
+          end
+        end
+      end
+
+      dev.vm.post_up_message = post_up_message
+    end
+  end
+end
